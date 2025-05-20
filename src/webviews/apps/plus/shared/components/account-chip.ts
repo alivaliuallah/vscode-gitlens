@@ -683,7 +683,7 @@ export class GlAccountChip extends LitElement {
 
 	private renderPromo() {
 		return html`<gl-promo
-			.promoPromise=${this.promos.getApplicablePromo('account')}
+			.promoPromise=${this.promos.getApplicablePromo(undefined, 'account')}
 			.source="${{ source: 'account' } as const}"
 		></gl-promo>`;
 	}

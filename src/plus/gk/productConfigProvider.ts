@@ -8,7 +8,7 @@ import { getLoggableName, Logger } from '../../system/logger';
 import { startLogScope } from '../../system/logger.scope';
 import type { Validator } from '../../system/validation';
 import { createValidator, Is } from '../../system/validation';
-import type { Promo, PromoLocation } from './models/promo';
+import type { Promo, PromoLocation, PromoPlans } from './models/promo';
 import type { ServerConnection } from './serverConnection';
 
 type Config = {
@@ -19,7 +19,9 @@ type ConfigJson = {
 	v: number;
 	promos: PromoJson[];
 };
-type PromoJson = Replace<Promo, 'expiresOn' | 'startsOn', string | undefined>;
+type PromoJson = Replace<Promo, 'expiresOn' | 'startsOn', string | undefined> & { v: number | undefined };
+
+const maximumKnownPromoVersion = 1;
 
 export class ProductConfigProvider {
 	private readonly _lazyConfig: Lazy<Promise<Config>>;
@@ -42,19 +44,23 @@ export class ProductConfigProvider {
 
 					const validator = createConfigValidator();
 					if (validator(data)) {
-						const promos = data.promos.map(
-							d =>
-								({
-									key: d.key,
-									code: d.code,
-									states: d.states,
-									expiresOn: d.expiresOn == null ? undefined : new Date(d.expiresOn).getTime(),
-									startsOn: d.startsOn == null ? undefined : new Date(d.startsOn).getTime(),
-									locations: d.locations,
-									content: d.content,
-									percentile: d.percentile,
-								}) satisfies Promo,
-						);
+						const promos = data.promos
+							// Filter out promos that we don't know how to handle
+							.filter(d => d.v == null || d.v <= maximumKnownPromoVersion)
+							.map(
+								d =>
+									({
+										key: d.key,
+										code: d.code,
+										plan: d.plan ?? 'pro',
+										states: d.states,
+										expiresOn: d.expiresOn == null ? undefined : new Date(d.expiresOn).getTime(),
+										startsOn: d.startsOn == null ? undefined : new Date(d.startsOn).getTime(),
+										locations: d.locations,
+										content: d.content,
+										percentile: d.percentile,
+									}) satisfies Promo,
+							);
 
 						const config: Config = { promos: promos };
 						await container.storage.store('product:config', { data: config, v: 1, timestamp: Date.now() });
@@ -87,6 +93,7 @@ export class ProductConfigProvider {
 				promos: [
 					{
 						key: 'pro50',
+						plan: 'pro',
 						states: [
 							SubscriptionState.Community,
 							SubscriptionState.Trial,
@@ -114,11 +121,15 @@ export class ProductConfigProvider {
 		});
 	}
 
-	async getApplicablePromo(state: number | undefined, location?: PromoLocation): Promise<Promo | undefined> {
+	async getApplicablePromo(
+		state: number | undefined,
+		plan: PromoPlans,
+		location?: PromoLocation,
+	): Promise<Promo | undefined> {
 		if (state == null) return undefined;
 
 		const promos = await this.getPromos();
-		return getApplicablePromo(promos, state, location);
+		return getApplicablePromo(promos, state, plan, location);
 	}
 
 	private getConfig(): Promise<Config> {
@@ -173,9 +184,11 @@ function createConfigValidator(): Validator<ConfigJson> {
 	});
 
 	const promoValidator = createValidator<PromoJson>({
+		v: Is.Optional(Is.Number),
 		key: Is.String,
 		code: Is.Optional(Is.String),
 		states: Is.Optional(Is.Array(isState)),
+		plan: Is.Optional(Is.Enum<PromoPlans>('pro', 'teams', 'enterprise')),
 		expiresOn: Is.Optional(Is.String),
 		startsOn: Is.Optional(Is.String),
 		locations: Is.Optional(Is.Array(isLocation)),
@@ -189,11 +202,16 @@ function createConfigValidator(): Validator<ConfigJson> {
 	});
 }
 
-function getApplicablePromo(promos: Promo[], state: number | undefined, location?: PromoLocation): Promo | undefined {
+function getApplicablePromo(
+	promos: Promo[],
+	state: number | undefined,
+	plan: PromoPlans,
+	location?: PromoLocation,
+): Promo | undefined {
 	if (state == null) return undefined;
 
 	for (const promo of promos) {
-		if (isPromoApplicable(promo, state)) {
+		if (isPromoApplicable(promo, state, plan)) {
 			if (location == null || promo.locations == null || promo.locations.includes(location)) {
 				return promo;
 			}
@@ -204,10 +222,11 @@ function getApplicablePromo(promos: Promo[], state: number | undefined, location
 	return undefined;
 }
 
-function isPromoApplicable(promo: Promo, state: number): boolean {
+function isPromoApplicable(promo: Promo, state: number, plan: PromoPlans): boolean {
 	const now = Date.now();
 
 	return (
+		(promo.plan == null || promo.plan === plan) &&
 		(promo.states == null || promo.states.includes(state)) &&
 		(promo.expiresOn == null || promo.expiresOn > now) &&
 		(promo.startsOn == null || promo.startsOn < now) &&
